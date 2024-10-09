@@ -1,6 +1,7 @@
 import boto3
 import json
 import urllib.request
+import traceback
 
 def send_response(event, context, response_status, response_data, physical_resource_id=None):
     response_body = {
@@ -10,6 +11,7 @@ def send_response(event, context, response_status, response_data, physical_resou
         'StackId': event['StackId'],
         'RequestId': event['RequestId'],
         'LogicalResourceId': event['LogicalResourceId'],
+        'NoEcho': True,  # Set NoEcho to True to avoid logging sensitive information
         'Data': response_data
     }
 
@@ -34,6 +36,7 @@ def send_response(event, context, response_status, response_data, physical_resou
         print(f"Failed to send response: {str(e)}")
 
 def handler(event, context):
+    print(f"Received event: {json.dumps(event)}")
     ec2 = boto3.client('ec2')
     
     try:
@@ -42,10 +45,12 @@ def handler(event, context):
         key_pair_name = properties['KeyPairName']
         
         if request_type == 'Create':
+            print(f"Creating key pair: {key_pair_name}")
             response = ec2.create_key_pair(KeyName=key_pair_name)
             private_key = response['KeyMaterial']
             key_pair_id = response['KeyPairId']
             
+            print(f"Key pair created successfully. ID: {key_pair_id}")
             send_response(event, context, 'SUCCESS', {
                 'PrivateKey': private_key,
                 'KeyPairId': key_pair_id
@@ -54,21 +59,28 @@ def handler(event, context):
         elif request_type == 'Update':
             old_physical_resource_id = event['PhysicalResourceId']
             
+            print(f"Deleting old key pair: {old_physical_resource_id}")
             ec2.delete_key_pair(KeyPairId=old_physical_resource_id)
             
+            print(f"Creating new key pair: {key_pair_name}")
             response = ec2.create_key_pair(KeyName=key_pair_name)
             private_key = response['KeyMaterial']
             key_pair_id = response['KeyPairId']
             
+            print(f"Key pair updated successfully. New ID: {key_pair_id}")
             send_response(event, context, 'SUCCESS', {
                 'PrivateKey': private_key,
                 'KeyPairId': key_pair_id
             }, physical_resource_id=key_pair_id)
         
         elif request_type == 'Delete':
-            ec2.delete_key_pair(KeyPairId=event['PhysicalResourceId'])
-            send_response(event, context, 'SUCCESS', {}, physical_resource_id=event['PhysicalResourceId'])
+            physical_resource_id = event['PhysicalResourceId']
+            print(f"Deleting key pair: {physical_resource_id}")
+            ec2.delete_key_pair(KeyPairId=physical_resource_id)
+            print("Key pair deleted successfully")
+            send_response(event, context, 'SUCCESS', {}, physical_resource_id=physical_resource_id)
     
     except Exception as e:
         print(f"Error: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
         send_response(event, context, 'FAILED', {}, physical_resource_id=event.get('PhysicalResourceId', 'could-not-create'))

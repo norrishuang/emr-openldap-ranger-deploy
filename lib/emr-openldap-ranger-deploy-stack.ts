@@ -5,54 +5,14 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as emr from 'aws-cdk-lib/aws-emr';
 import * as rds from 'aws-cdk-lib/aws-rds';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
-import * as cr from 'aws-cdk-lib/custom-resources';
-import * as lambda from 'aws-cdk-lib/aws-lambda';
 
 
 export class EmrOpenldapRangerDeployStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // // Create a Lambda function to manage the key pair
-    // const keyPairLambda = new lambda.Function(this, 'KeyPairLambda', {
-    //   runtime: lambda.Runtime.PYTHON_3_10,
-    //   handler: 'index.handler',
-    //   code: lambda.Code.fromAsset('lambda'),
-    //   timeout: cdk.Duration.minutes(5),
-    // });
-
-    // // Grant the Lambda function permission to manage key pairs
-    // keyPairLambda.addToRolePolicy(new iam.PolicyStatement({
-    //   actions: ['ec2:CreateKeyPair', 'ec2:DeleteKeyPair', 'ec2:DescribeKeyPairs'],
-    //   resources: ['*'],
-    // }));
-
-    // // Create a custom resource provider
-    // const keyPairProvider = new cr.Provider(this, 'KeyPairProvider', {
-    //   onEventHandler: keyPairLambda,
-    // });
-
     // // Create the custom resource for key pair
     const keyPairName = 'my-ec2-key-pair';
-    // const keyPairCustomResource = new cdk.CustomResource(this, 'KeyPairCustomResource', {
-    //   serviceToken: keyPairProvider.serviceToken,
-    //   properties: {
-    //     KeyPairName: keyPairName,
-    //   },
-    // });
-
-    // // Extract the private key and key pair ID from the custom resource
-    // const privateKey = keyPairCustomResource.getAtt('PrivateKey').toString();
-    // const keyPairId = keyPairCustomResource.getAtt('KeyPairId').toString();
-
-    // // Create a secret to store the private key
-    // const keyPairSecret = new secretsmanager.Secret(this, 'KeyPairSecret', {
-    //   secretName: 'ec2-keypair-secret',
-    //   description: 'Private key for EC2 key pair',
-    //   secretStringValue: cdk.SecretValue.unsafePlainText(privateKey),
-    // });
-
-    // keyPairSecret.node.addDependency(keyPairCustomResource);
 
     const keyPairSecret = secretsmanager.Secret.fromSecretNameV2(this, 'MySecret', 'ec2-keypair-secret');
 
@@ -88,23 +48,25 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
     // Attach AdministratorAccess policy to the user
     myuser.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AdministratorAccess'));
 
-    const MyIAMUserAccessKey = new iam.AccessKey(this, 'MyIAMUserAccessKey', {
-      user: myuser,
-    });
+    // const MyIAMUserAccessKey = new iam.AccessKey(this, 'MyIAMUserAccessKey', {
+    //   user: myuser,
+    // });
 
-    
+    const MyIAMUserAccessKey = new iam.CfnAccessKey(this, 'MyIAMUserAccessKey', {
+      userName: myuser.userName,
+    });
 
     const accessKeySecret = new secretsmanager.Secret(this, 'AccessKeySecret', {
       secretName: 'my-iam-user-credentials',
       description: 'Access key and secret key for IAM user',
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({ 
-          accessKeyId: MyIAMUserAccessKey.accessKeyId,
-          username: myuser.userName,
-          secretAccessKey: MyIAMUserAccessKey.secretAccessKey,
-        }),
-        generateStringKey: 'secretAccessKey',
+      secretObjectValue: {
+        accessKeyId: cdk.SecretValue.unsafePlainText(MyIAMUserAccessKey.ref),
+        secretAccessKey: cdk.SecretValue.unsafePlainText(MyIAMUserAccessKey.attrSecretAccessKey),
       },
+        // excludeCharacters: '0oO1lI', // Exclude easily confused characters
+        // passwordLength: 32, // Set the length of the secret key
+        // requireEachIncludedType: true, // Require at least one of each included type
+        // includeSpace: false, // Don't include spaces
     });
 
     // Create a new key pair
@@ -144,12 +106,14 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
     // Create EMR cluster
     const cluster = new emr.CfnCluster(this, 'MyEMRCluster', {
       name: 'MyMultiMasterEMRCluster',
-      releaseLabel: 'emr-6.5.0',
+      releaseLabel: 'emr-6.10.0',
       applications: [
         // { name: 'Spark' },
         { name: 'Hive' },
         { name: 'Tez' },
-        { name: 'Trino' }
+        { name: 'Trino' },
+        { name: 'Hue' },
+        { name: 'Oozie' }
       ],
       configurations: [
         {
@@ -160,6 +124,37 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
             'javax.jdo.option.ConnectionUserName': `{{resolve:secretsmanager:${rdsSecret.secretArn}:SecretString:username}}`,
             'javax.jdo.option.ConnectionPassword': `{{resolve:secretsmanager:${rdsSecret.secretArn}:SecretString:password}}`,
           },
+        },
+        {
+          classification: "oozie-site",
+          configurationProperties: {
+                "oozie.service.JPAService.jdbc.driver": "org.mariadb.jdbc.Driver",
+                "oozie.service.JPAService.jdbc.url": `jdbc:mysql://${dbInstance.dbInstanceEndpointAddress}:${dbInstance.dbInstanceEndpointPort}/oozie?createDatabaseIfNotExist=true`,                               
+                "oozie.service.JPAService.jdbc.username": `{{resolve:secretsmanager:${rdsSecret.secretArn}:SecretString:username}}`,
+                "oozie.service.JPAService.jdbc.password": `{{resolve:secretsmanager:${rdsSecret.secretArn}:SecretString:password}}`,
+            }
+        },
+        {
+          classification: "hue-ini",
+          configurations: [
+            {
+              classification: "desktop",
+              configurationProperties: {},
+              configurations: [
+                {
+                  classification: "database",
+                  configurationProperties: {
+                    'engine': 'mysql',
+                    'host': `${dbInstance.dbInstanceEndpointAddress}`,
+                    'port': `${dbInstance.dbInstanceEndpointPort}`,
+                    'user': `{{resolve:secretsmanager:${rdsSecret.secretArn}:SecretString:username}}`,
+                    'password': `{{resolve:secretsmanager:${rdsSecret.secretArn}:SecretString:password}}`,
+                    'name': 'hive'
+                  }
+                }
+              ]
+            }
+          ]
         },
       ],
       instances: {
@@ -173,7 +168,7 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
         },
         ec2KeyName: keyPairName,
         ec2SubnetIds: [
-          vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds[0],
+          vpc.selectSubnets({ subnetType: ec2.SubnetType.PUBLIC }).subnetIds[0],
         ],
         additionalMasterSecurityGroups: [sharedSecurityGroup.securityGroupId],
         additionalSlaveSecurityGroups: [sharedSecurityGroup.securityGroupId],
@@ -194,6 +189,8 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
     
     // Add additional permissions if needed
     ec2Role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'));
+    ec2Role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('SecretsManagerReadWrite'));
+    ec2Role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEMRFullAccessPolicy_v2'));
 
     // Create the EC2 instance
     const instance = new ec2.Instance(this, 'OpenLDAP_Ranger_Instance', {
@@ -204,14 +201,22 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
       securityGroup: sharedSecurityGroup,
       role: ec2Role,
       keyPair: keyPair,
+      blockDevices: [
+        {
+          deviceName: '/dev/xvda', // Root volume
+          volume: ec2.BlockDeviceVolume.ebs(50, {
+            volumeType: ec2.EbsDeviceVolumeType.GP3,
+          }),
+        },
+      ],
       userData: ec2.UserData.forLinux(),
     });
 
     // instance.node.addDependency(keyPairCustomResource);
     // Grant the instance permission to read the secret
     // Grant permission to read the specific secret
-    keyPairSecret.grantRead(ec2Role);
-    accessKeySecret.grantRead(ec2Role);
+    // keyPairSecret.grantRead(ec2Role);
+    // accessKeySecret.grantRead(ec2Role);
 
     // Define user data (bootstrap script)
     instance.addUserData(
@@ -236,19 +241,19 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
       'SECRET_ACCESS_KEY=$(echo $SECRET_JSON | jq -r .secretAccessKey)',
 
       // Set the AKSK as environment variables
-      'echo "export AWS_ACCESS_KEY_ID=$ACCESS_KEY_ID" >> /home/ec2-user/.bashrc',
-      'echo "export AWS_SECRET_ACCESS_KEY=\'$SECRET_ACCESS_KEY\'" >> /home/ec2-user/.bashrc',
+      // 'echo "export AWS_ACCESS_KEY_ID=$ACCESS_KEY_ID" >> /home/ec2-user/.bashrc',
+      // 'echo "export AWS_SECRET_ACCESS_KEY=\"$SECRET_ACCESS_KEY\"" >> /home/ec2-user/.bashrc',
       // Retrieve and save the private key
       // `aws secretsmanager get-secret-value --secret-id ${accessKeySecret.secretArn} --region ${this.region} --query SecretString --output text | jq -r .privatekey > /home/ec2-user/my-ec2-key-pair.pem`,
-      `aws secretsmanager get-secret-value --secret-id ${keyPairSecret.secretArn} --region ${this.region} --query SecretString --output text > /home/ec2-user/my-ec2-key-pair.pem`,
+      `aws secretsmanager get-secret-value --secret-id ${keyPairSecret.secretName} --region ${this.region} --query SecretString --output text > /home/ec2-user/my-ec2-key-pair.pem`,
       'chmod 400 /home/ec2-user/my-ec2-key-pair.pem',
       'SSH_KEY=/home/ec2-user/my-ec2-key-pair.pem',
       'export OPENLDAP_HOST=`hostname`',
 
       'sudo sh ./ranger-emr-cli-installer/bin/setup.sh install \\',
       '  --region "$REGION" \\',
-      '  --access-key-id "$ACCESS_KEY_ID" \\',
-      '  --secret-access-key \'"$SECRET_ACCESS_KEY\'" \\',
+      '  --access-key-id \""$ACCESS_KEY_ID"\" \\',
+      '  --secret-access-key \""$SECRET_ACCESS_KEY\"" \\',
       '  --ssh-key "$SSH_KEY" \\',
       '  --solution \'open-source\' \\',
       '  --auth-provider \'openldap\' \\',
@@ -260,9 +265,9 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
       '  --openldap-group-search-filter \'(member=uid={0},ou=users,dc=example,dc=com)\' \\',
       '  --openldap-user-object-class \'inetOrgPerson\' \\',
       '  --example-users \'example-user-1,example-user-2\' \\',
-      '  --ranger-plugins \'open-source-hdfs,open-source-metastore,open-source-yarn\'',
-      `  --emr-cluster-id ${clusterId}`,
-      '  --auto-confirm \'true\' > install.log'
+      '  --ranger-plugins \'open-source-hdfs,open-source-metastore,open-source-yarn\' \\',
+      `  --emr-cluster-id ${clusterId} \\`,
+      '  --auto-confirm \'true\''
     );
 
 
