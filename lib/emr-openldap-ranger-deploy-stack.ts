@@ -11,15 +11,41 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
+    // Retrieve environment variables
+    const vpcId = process.env.VPC_ID;
+    console.log("VPC ID:" + vpcId)
+    const region = process.env.AWS_REGION || this.region;
+
     // // Create the custom resource for key pair
     const keyPairName = 'my-ec2-key-pair';
 
     const keyPairSecret = secretsmanager.Secret.fromSecretNameV2(this, 'MySecret', 'ec2-keypair-secret');
 
-    // Import the existing VPC
-    const vpc = ec2.Vpc.fromLookup(this, 'ExistingVPC', {
-      vpcId: 'vpc-08c2ed0b51139d66c',
-    });
+    let vpc: ec2.IVpc;
+    if (vpcId) {
+      // If VPC ID is provided, use the existing VPC
+      vpc = ec2.Vpc.fromLookup(this, 'ExistingVPC', { vpcId: vpcId });
+    } else {
+      // If VPC ID is not provided, create a new VPC
+      vpc = new ec2.Vpc(this, 'NewVPC', {
+        maxAzs: 3,
+        cidr: '10.0.0.0/16',
+        subnetConfiguration: [
+          {
+            cidrMask: 24,
+            name: 'Public',
+            subnetType: ec2.SubnetType.PUBLIC,
+          },
+          {
+            cidrMask: 24,
+            name: 'Private',
+            subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+          }
+        ],
+        natGateways: 1
+      });
+    }
+
 
     // Create a new security group for both RDS and EMR
     const sharedSecurityGroup = new ec2.SecurityGroup(this, 'SharedSecurityGroup', {
