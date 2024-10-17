@@ -132,7 +132,7 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
     // Create EMR cluster
     const cluster = new emr.CfnCluster(this, 'MyEMRCluster', {
       name: 'MyMultiMasterEMRCluster',
-      releaseLabel: 'emr-6.10.0',
+      releaseLabel: 'emr-7.3.0',
       applications: [
         // { name: 'Spark' },
         { name: 'Hive' },
