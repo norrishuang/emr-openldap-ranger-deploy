@@ -323,8 +323,8 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
 
 
     // Output the instance public IP
-    new cdk.CfnOutput(this, 'InstancePublicIP', {
-      value: instance.instancePublicIp,
+    new cdk.CfnOutput(this, 'Apache Ranger URL', {
+      value: `http://${instance.instancePublicDnsName}:6080`,
       description: 'Public IP address of the EC2 instance',
     });
 
@@ -363,6 +363,7 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
       value: dbInstance.dbInstanceEndpointAddress,
       description: 'Endpoint of the RDS instance',
     });
+
 
     // Output the AWS CLI command to retrieve the keypair
     new cdk.CfnOutput(this, 'KeyPairRetrievalCommand', {
