@@ -60,11 +60,11 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
       'Allow all traffic from resources within the security group'
     );
 
-    sharedSecurityGroup.addIngressRule(
-      sharedSecurityGroup,
-      ec2.Port.tcp(3306),
-      'Allow MySQL traffic from EMR cluster'
-    );
+    // sharedSecurityGroup.addIngressRule(
+    //   sharedSecurityGroup,
+    //   ec2.Port.tcp(3306),
+    //   'Allow MySQL traffic from EMR cluster'
+    // );
 
     // Create an IAM user
     const myuser = new iam.User(this, 'MyIAMUser', {
@@ -132,7 +132,7 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
     // Create EMR cluster
     const cluster = new emr.CfnCluster(this, 'MyEMRCluster', {
       name: 'MyMultiMasterEMRCluster',
-      releaseLabel: 'emr-7.3.0',
+      releaseLabel: 'emr-6.8.0',
       applications: [
         // { name: 'Spark' },
         { name: 'Hive' },
@@ -150,6 +150,12 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
             'javax.jdo.option.ConnectionUserName': `{{resolve:secretsmanager:${rdsSecret.secretArn}:SecretString:username}}`,
             'javax.jdo.option.ConnectionPassword': `{{resolve:secretsmanager:${rdsSecret.secretArn}:SecretString:password}}`,
           },
+        },
+        {
+          classification: "iceberg-defaults",
+          configurationProperties: {
+            "iceberg.enabled": "true"
+          }
         },
         {
           classification: "oozie-site",
@@ -187,10 +193,32 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
         masterInstanceGroup: {
           instanceCount: 3,  // This creates a multi-master setup
           instanceType: 'm5.xlarge',
+          ebsConfiguration: {
+            ebsBlockDeviceConfigs: [
+              {
+                volumeSpecification: {
+                  sizeInGb: 50,
+                  volumeType: 'gp3',
+                },
+                volumesPerInstance: 1,
+              }
+            ],
+          },
         },
         coreInstanceGroup: {
           instanceCount: 3,
           instanceType: 'm5.xlarge',
+          ebsConfiguration: {
+            ebsBlockDeviceConfigs: [
+              {
+                volumeSpecification: {
+                  sizeInGb: 50,
+                  volumeType: 'gp3',
+                },
+                volumesPerInstance: 1,
+              }
+            ],
+          },
         },
         ec2KeyName: keyPairName,
         ec2SubnetIds: [
@@ -200,6 +228,7 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
         additionalSlaveSecurityGroups: [sharedSecurityGroup.securityGroupId],
         terminationProtected: false,
       },
+      ebsRootVolumeSize: 50,
       jobFlowRole: 'EMR_EC2_DefaultRole',
       serviceRole: 'EMR_DefaultRole',
       visibleToAllUsers: true,
@@ -266,34 +295,30 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
       'ACCESS_KEY_ID=$(echo $SECRET_JSON | jq -r .accessKeyId)',
       'SECRET_ACCESS_KEY=$(echo $SECRET_JSON | jq -r .secretAccessKey)',
 
-      // Set the AKSK as environment variables
-      // 'echo "export AWS_ACCESS_KEY_ID=$ACCESS_KEY_ID" >> /home/ec2-user/.bashrc',
-      // 'echo "export AWS_SECRET_ACCESS_KEY=\"$SECRET_ACCESS_KEY\"" >> /home/ec2-user/.bashrc',
-      // Retrieve and save the private key
-      // `aws secretsmanager get-secret-value --secret-id ${accessKeySecret.secretArn} --region ${this.region} --query SecretString --output text | jq -r .privatekey > /home/ec2-user/my-ec2-key-pair.pem`,
       `aws secretsmanager get-secret-value --secret-id ${keyPairSecret.secretName} --region ${this.region} --query SecretString --output text > /home/ec2-user/my-ec2-key-pair.pem`,
       'chmod 400 /home/ec2-user/my-ec2-key-pair.pem',
       'SSH_KEY=/home/ec2-user/my-ec2-key-pair.pem',
-      'export OPENLDAP_HOST=`hostname`',
+      'export OPENLDAP_HOST=$(hostname -f)',
 
       'sudo sh ./ranger-emr-cli-installer/bin/setup.sh install \\',
-      '  --region "$REGION" \\',
-      '  --access-key-id \""$ACCESS_KEY_ID"\" \\',
-      '  --secret-access-key \""$SECRET_ACCESS_KEY\"" \\',
-      '  --ssh-key "$SSH_KEY" \\',
+      '  --region $REGION \\',
+      '  --access-key-id $ACCESS_KEY_ID \\',
+      '  --secret-access-key $SECRET_ACCESS_KEY \\',
+      '  --ssh-key $SSH_KEY \\',
       '  --solution \'open-source\' \\',
       '  --auth-provider \'openldap\' \\',
-      '  --openldap-host "$OPENLDAP_HOST" \\',
+      '  --openldap-host $OPENLDAP_HOST \\',
       '  --openldap-base-dn \'dc=example,dc=com\' \\',
       '  --openldap-root-cn \'admin\' \\',
       '  --openldap-root-password \'Admin1234!\' \\',
       '  --openldap-user-dn-pattern \'uid={0},ou=users,dc=example,dc=com\' \\',
       '  --openldap-group-search-filter \'(member=uid={0},ou=users,dc=example,dc=com)\' \\',
       '  --openldap-user-object-class \'inetOrgPerson\' \\',
-      '  --example-users \'example-user-1,example-user-2\' \\',
-      '  --ranger-plugins \'open-source-hdfs,open-source-metastore,open-source-yarn\' \\',
+      '  --example-users \'example-user-1,example-user-2,hue\' \\',
+      '  --ranger-plugins \'open-source-metastore,open-source-yarn\' \\',
       `  --emr-cluster-id ${clusterId} \\`,
-      '  --auto-confirm \'true\''
+      '  --auto-confirm \'true\' \\',
+      '  --enable-trino \'true\'',
     );
 
 
@@ -303,14 +328,14 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
       description: 'Public IP address of the EC2 instance',
     });
 
-    // Output the key pair ID and secret ARN
-    // new cdk.CfnOutput(this, 'KeyPairId', {
-    //   value: keyPairId,
-    //   description: 'ID of the EC2 Key Pair',
-    // });
 
     new cdk.CfnOutput(this, 'KeyPairSecretArn', {
       value: keyPairSecret.secretArn,
+      description: 'ARN of the secret containing the private key',
+    });
+
+    new cdk.CfnOutput(this, 'OpenLDAP/Ranger Instence', {
+      value: instance.instanceId,
       description: 'ARN of the secret containing the private key',
     });
 
@@ -338,5 +363,12 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
       value: dbInstance.dbInstanceEndpointAddress,
       description: 'Endpoint of the RDS instance',
     });
+
+    // Output the AWS CLI command to retrieve the keypair
+    new cdk.CfnOutput(this, 'KeyPairRetrievalCommand', {
+      value: `aws secretsmanager get-secret-value --secret-id ${keyPairSecret.secretName} --region ${this.region} --query SecretString --output text > ~/my-ec2-key-pair.pem && chmod 400 ~/my-ec2-key-pair.pem && ssh -i "~/my-ec2-key-pair.pem" ec2-user@${instance.instancePublicDnsName}`,
+      description: 'AWS CLI command to retrieve the keypair and save it locally and sign in ec2 instance.',
+    });
+
   }
 }
