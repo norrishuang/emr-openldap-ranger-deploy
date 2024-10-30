@@ -325,7 +325,7 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
     // Output the instance public IP
     new cdk.CfnOutput(this, 'Apache Ranger URL', {
       value: `http://${instance.instancePublicDnsName}:6080`,
-      description: 'Public IP address of the EC2 instance',
+      description: 'Apache Ranger UI',
     });
 
 
