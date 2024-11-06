@@ -25,3 +25,9 @@ cdk deploy --all
 * EC2 for install Open LDAP and Apache Ranger
 
 ![image](./images/architecture.png)
+
+When deloyment finished, There is a URL for Apache Ranger UI in output of CDK stack.
+
+```
+http://<ranger-instance-host>:6080
+```
