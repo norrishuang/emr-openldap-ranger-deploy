@@ -247,8 +247,61 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
     ec2Role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('SecretsManagerReadWrite'));
     ec2Role.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonEMRFullAccessPolicy_v2'));
 
+    
+
     // Create the EC2 instance
-    const instance = new ec2.Instance(this, 'OpenLDAP_Ranger_Instance', {
+    const instanceLdap = new ec2.Instance(this, 'LDAPAdmin_Instance', {
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.M5, ec2.InstanceSize.LARGE),
+      machineImage: ec2.MachineImage.latestAmazonLinux2(),
+      securityGroup: sharedSecurityGroup,
+      role: ec2Role,
+      keyPair: keyPair,
+      blockDevices: [
+        {
+          deviceName: '/dev/xvda', // Root volume
+          volume: ec2.BlockDeviceVolume.ebs(50, {
+            volumeType: ec2.EbsDeviceVolumeType.GP3,
+          }),
+        },
+      ],
+      userData: ec2.UserData.forLinux(),
+    });
+
+    // instance.node.addDependency(keyPairCustomResource);
+    // Grant the instance permission to read the secret
+    // Grant permission to read the specific secret
+    // keyPairSecret.grantRead(ec2Role);
+    // accessKeySecret.grantRead(ec2Role);
+
+    // Define user data (bootstrap script)
+    instanceLdap.addUserData(
+      '#!/bin/bash',
+      'set -e',
+      'set -x',
+      
+      '# Update the system',
+      'yum update -y',
+      
+      '# Install useful tools',
+      'yum install -y amazon-cloudwatch-agent htop jq git',
+      'yum -y install httpd php php-ldap php-gd php-mbstring php-pear php-bcmath php-xml',
+      'wget https://nchc.dl.sourceforge.net/project/phpldapadmin/phpldapadmin-php5/1.2.3/phpldapadmin-1.2.3.tgz',
+      'tar -zxvf phpldapadmin-1.2.3.tgz',
+      'mv phpldapadmin-1.2.3 /var/www/html/phpldapadmin',
+      'cd /var/www/html/phpldapadmin/config/',
+      'cp config.php.example config.php',
+      // "sed -i 's|\$servers->setValue('\''server'\'','\''host'\'','\''127.0.0.1'\'');|\$servers->setValue('\''server'\'','\''host'\'','\''ip-10-192-10-51.ec2.internal'\'');|' config.php",
+      "sed -i \"s/\$servers->setValue('server','base',array(''));/\$servers->setValue('server','base',array('dc=example,dc=com'));/\" config.php",
+      "sed -i \"s/\$servers->setValue('login','bind_id','');/\$servers->setValue('login','bind_id','cn=admin,dc=example,dc=com');/\" config.php",
+      "sed -i \"s/\$servers->setValue('login','bind_pass','');/\$servers->setValue('login','bind_pass','Admin1234!');/\" config.php",
+      "systemctl restart httpd"
+      
+    );
+
+    // Create the EC2 instance
+    const instanceRanger = new ec2.Instance(this, 'Apache_Ranger_Instance', {
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
       instanceType: ec2.InstanceType.of(ec2.InstanceClass.M5, ec2.InstanceSize.XLARGE),
@@ -274,7 +327,7 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
     // accessKeySecret.grantRead(ec2Role);
 
     // Define user data (bootstrap script)
-    instance.addUserData(
+    instanceRanger.addUserData(
       '#!/bin/bash',
       'set -e',
       'set -x',
@@ -298,7 +351,7 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
       `aws secretsmanager get-secret-value --secret-id ${keyPairSecret.secretName} --region ${this.region} --query SecretString --output text > /home/ec2-user/my-ec2-key-pair.pem`,
       'chmod 400 /home/ec2-user/my-ec2-key-pair.pem',
       'SSH_KEY=/home/ec2-user/my-ec2-key-pair.pem',
-      'export OPENLDAP_HOST=$(hostname -f)',
+      `export OPENLDAP_HOST=${instanceLdap.instancePrivateDnsName}`,
 
       'sudo sh ./ranger-emr-cli-installer/bin/setup.sh install \\',
       '  --region $REGION \\',
@@ -322,10 +375,18 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
     );
 
 
-    // Output the instance public IP
+
+    // Apache Ranger URL
     new cdk.CfnOutput(this, 'Apache Ranger URL', {
-      value: `http://${instance.instancePublicDnsName}:6080`,
+      value: `http://${instanceRanger.instancePublicDnsName}:6080`,
       description: 'Apache Ranger UI',
+    });
+
+
+    // 
+    new cdk.CfnOutput(this, 'LDAP URL', {
+      value: `http://${instanceLdap.instancePublicDnsName}/phpldapadmin`,
+      description: 'LDAP URL',
     });
 
 
@@ -335,7 +396,7 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
     });
 
     new cdk.CfnOutput(this, 'OpenLDAP/Ranger Instence', {
-      value: instance.instanceId,
+      value: instanceRanger.instanceId,
       description: 'ARN of the secret containing the private key',
     });
 
@@ -367,7 +428,7 @@ export class EmrOpenldapRangerDeployStack extends cdk.Stack {
 
     // Output the AWS CLI command to retrieve the keypair
     new cdk.CfnOutput(this, 'KeyPairRetrievalCommand', {
-      value: `aws secretsmanager get-secret-value --secret-id ${keyPairSecret.secretName} --region ${this.region} --query SecretString --output text > ~/my-ec2-key-pair.pem && chmod 400 ~/my-ec2-key-pair.pem && ssh -i "~/my-ec2-key-pair.pem" ec2-user@${instance.instancePublicDnsName}`,
+      value: `aws secretsmanager get-secret-value --secret-id ${keyPairSecret.secretName} --region ${this.region} --query SecretString --output text > ~/my-ec2-key-pair.pem && chmod 400 ~/my-ec2-key-pair.pem && ssh -i "~/my-ec2-key-pair.pem" ec2-user@${instanceRanger.instancePublicDnsName}`,
       description: 'AWS CLI command to retrieve the keypair and save it locally and sign in ec2 instance.',
     });
 
